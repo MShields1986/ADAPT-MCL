@@ -1,0 +1,202 @@
+name: lilocbench
+
+x-localiser: &localiser-base
+    environment:
+      - lilocbench
+      - DISPLAY                        # Req'd for RViz
+      - LIBGL_ALWAYS_SOFTWARE=1        # Req'd for RViz
+      - 'DISABLE_ROS1_EOL_WARNINGS=${DISABLE_ROS1_EOL_WARNINGS}'
+      # - 'CATKIN_WORKSPACE_DIR=${CATKIN_WORKSPACE_DIR}'
+      # - 'ROS_MASTER_URI=${ROS_MASTER_URI}'
+      # - 'ROS_HOSTNAME=${ROS_HOSTNAME}'
+      # - 'ROS_IP=${ROS_IP}
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      network: host
+      target: base
+    #deploy:
+    #  resources:
+    #    limits:
+    #      cpus: '0.001'
+    #      memory: 500M
+    #    reservations:
+    #      cpus: '0.0001'
+    #      memory: 100M
+    # privileged: true
+    # network_mode: host
+    ipc: host
+    volumes:
+      - ../src:/catkin_ws/src
+      - ${DATA_DIR}:/data:ro           # bags, map, ground truth poses
+      - ./output:/output               # results written to /output/results/<seq>/run_1.txt
+      - $XAUTHORITY:/root/.Xauthority  # Req'd for RViz
+      - /tmp/.X11-unix:/tmp/.X11-unix  # Req'd for RViz
+
+
+services:
+
+  # ── Train sequences (public, with ground truth) ──────────────────────────
+  # docker compose --profile train up <service>
+
+  mapping:
+    <<: *localiser-base
+    networks: [net_mapping]
+    profiles: [train]
+    command: timeout --signal=INT 870 roslaunch lilocbench_ros mapping.launch
+
+  static_0:
+    <<: *localiser-base
+    networks: [net_static_0]
+    profiles: [train]
+    command: timeout --signal=INT 660 roslaunch lilocbench_ros static_0.launch launch_rviz:=true
+
+  dynamics_0:
+    <<: *localiser-base
+    networks: [net_dynamics_0]
+    profiles: [train]
+    command: timeout --signal=INT 220 roslaunch lilocbench_ros dynamics_0.launch launch_rviz:=true
+
+  lt_changes_0:
+    <<: *localiser-base
+    networks: [net_lt_changes_0]
+    profiles: [train]
+    command: timeout --signal=INT 500 roslaunch lilocbench_ros lt_changes_0.launch launch_rviz:=true
+
+  lt_changes_dynamics_0:
+    <<: *localiser-base
+    networks: [net_lt_changes_dynamics_0]
+    profiles: [train]
+    command: timeout --signal=INT 620 roslaunch lilocbench_ros lt_changes_dynamics_0.launch launch_rviz:=true
+
+  # ── Test sequences (competition / non-public ground truth) ────────────────
+  # docker compose --profile test up <service>
+  # IMPORTANT: update init_x/init_y/init_theta in each launch file from the
+  # dataset's init_pose.txt before running.
+
+  static_1:
+    <<: *localiser-base
+    networks: [net_static_1]
+    profiles: [test]
+    command: timeout --signal=INT 820 roslaunch lilocbench_ros static_1.launch launch_rviz:=true
+
+  static_2:
+    <<: *localiser-base
+    networks: [net_static_2]
+    profiles: [test]
+    command: timeout --signal=INT 250 roslaunch lilocbench_ros static_2.launch launch_rviz:=true
+
+  static_3:
+    <<: *localiser-base
+    networks: [net_static_3]
+    profiles: [test]
+    command: timeout --signal=INT 280 roslaunch lilocbench_ros static_3.launch launch_rviz:=true
+
+  static_4:
+    <<: *localiser-base
+    networks: [net_static_4]
+    profiles: [test]
+    command: timeout --signal=INT 380 roslaunch lilocbench_ros static_4.launch launch_rviz:=true
+
+  static_5:
+    <<: *localiser-base
+    networks: [net_static_5]
+    profiles: [test]
+    command: timeout --signal=INT 180 roslaunch lilocbench_ros static_5.launch launch_rviz:=true
+
+  static_6:
+    <<: *localiser-base
+    networks: [net_static_6]
+    profiles: [test]
+    command: timeout --signal=INT 870 roslaunch lilocbench_ros static_6.launch launch_rviz:=true
+
+  dynamics_1:
+    <<: *localiser-base
+    networks: [net_dynamics_1]
+    profiles: [test]
+    command: timeout --signal=INT 200 roslaunch lilocbench_ros dynamics_1.launch launch_rviz:=true
+
+  dynamics_2:
+    <<: *localiser-base
+    networks: [net_dynamics_2]
+    profiles: [test]
+    command: timeout --signal=INT 240 roslaunch lilocbench_ros dynamics_2.launch launch_rviz:=true
+
+  dynamics_3:
+    <<: *localiser-base
+    networks: [net_dynamics_3]
+    profiles: [test]
+    command: timeout --signal=INT 660 roslaunch lilocbench_ros dynamics_3.launch launch_rviz:=true
+
+  dynamics_4:
+    <<: *localiser-base
+    networks: [net_dynamics_4]
+    profiles: [test]
+    command: timeout --signal=INT 310 roslaunch lilocbench_ros dynamics_4.launch launch_rviz:=true
+
+  lt_changes_1:
+    <<: *localiser-base
+    networks: [net_lt_changes_1]
+    profiles: [test]
+    command: timeout --signal=INT 330 roslaunch lilocbench_ros lt_changes_1.launch launch_rviz:=true
+
+  lt_changes_2:
+    <<: *localiser-base
+    networks: [net_lt_changes_2]
+    profiles: [test]
+    command: timeout --signal=INT 410 roslaunch lilocbench_ros lt_changes_2.launch launch_rviz:=true
+
+  lt_changes_3:
+    <<: *localiser-base
+    networks: [net_lt_changes_3]
+    profiles: [test]
+    command: timeout --signal=INT 550 roslaunch lilocbench_ros lt_changes_3.launch launch_rviz:=true
+
+  lt_changes_4:
+    <<: *localiser-base
+    networks: [net_lt_changes_4]
+    profiles: [test]
+    command: timeout --signal=INT 1100 roslaunch lilocbench_ros lt_changes_4.launch launch_rviz:=true
+
+  lt_changes_5:
+    <<: *localiser-base
+    networks: [net_lt_changes_5]
+    profiles: [test]
+    command: timeout --signal=INT 290 roslaunch lilocbench_ros lt_changes_5.launch launch_rviz:=true
+
+  lt_changes_dynamics_1:
+    <<: *localiser-base
+    networks: [net_lt_changes_dynamics_1]
+    profiles: [test]
+    command: timeout --signal=INT 750 roslaunch lilocbench_ros lt_changes_dynamics_1.launch launch_rviz:=true
+
+  # ── Development shell ─────────────────────────────────────────────────────
+  dev:
+    <<: *localiser-base
+    networks: [net_dev]
+    command: sleep infinity
+    profiles: [dev]
+
+networks:
+  net_mapping:
+  net_static_0:
+  net_dynamics_0:
+  net_lt_changes_0:
+  net_lt_changes_dynamics_0:
+  net_static_1:
+  net_static_2:
+  net_static_3:
+  net_static_4:
+  net_static_5:
+  net_static_6:
+  net_dynamics_1:
+  net_dynamics_2:
+  net_dynamics_3:
+  net_dynamics_4:
+  net_lt_changes_1:
+  net_lt_changes_2:
+  net_lt_changes_3:
+  net_lt_changes_4:
+  net_lt_changes_5:
+  net_lt_changes_dynamics_1:
+  net_dev:

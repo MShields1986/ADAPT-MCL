@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>lilocbench_ros</name>
+  <version>0.1.0</version>
+  <description>ROS 1 wrapper for the LILocBench particle filter localizer.</description>
+  <maintainer email="user@example.com">LILocBench</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <depend>roscpp</depend>
+  <depend>sensor_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>visualization_msgs</depend>
+  <depend>tf2_ros</depend>
+  <depend>tf2_geometry_msgs</depend>
+  <depend>message_filters</depend>
+  <depend>adapt_mcl</depend>
+
+  <exec_depend>map_server</exec_depend>
+  <exec_depend>rosbag</exec_depend>
+</package>

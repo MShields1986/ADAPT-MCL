@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<launch>
+  <arg name="launch_rviz" default="true"/>
+  <arg name="output_dir"  default="/output/results"/>
+
+  <include file="$(find lilocbench_ros)/launch/localize.launch">
+    <arg name="sequence"   value="static_0"/>
+    <arg name="bag"        value="/data/static_0/static_0_no_cams.bag"/>
+    <arg name="map"        value="/data/map_office/map_office.yaml"/>
+    <arg name="output_dir" value="$(arg output_dir)"/>
+    <arg name="init_x"     value="9.971633"/>
+    <arg name="init_y"     value="-3.639337"/>
+    <arg name="init_theta" value="0.025742"/>
+  </include>
+
+  <group if="$(arg launch_rviz)">
+    <node pkg="rviz" type="rviz" name="rviz" required="false" output="screen"
+          args="-d $(find lilocbench_ros)/config/default.rviz"/>
+  </group>
+</launch>

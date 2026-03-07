@@ -1,0 +1,96 @@
+# ROS 1 parameter server (flat namespace under the node name).
+# Load with: rosparam load params.yaml /localizer_node
+
+# --- Topics ---
+# Actual Dingo robot topics from the bags.
+scan_front_topic:  "/laser_scan_front/scan"
+scan_rear_topic:   "/laser_scan_rear/scan"
+odom_topic:        "/dingo_velocity_controller/odom"
+map_topic:         "/map"
+
+# --- Output ---
+sequence_name: "static_0"          # must match LILocBench sequence name
+output_dir: "/output/results"      # directory where run_*.txt files are written
+
+# --- Initial pose (map frame, metres / radians) ---
+# Set from data/<seq>/init_pose.txt (x y theta).
+initial_pose_x:      0.0
+initial_pose_y:      0.0
+initial_pose_theta:  0.0
+
+# --- Timing ---
+# Positive = scan stamped early (add offset), negative = stamped late (subtract).
+# Tune against static sequences. A 30ms latency at 0.5m/s gives ~1.5cm error.
+scan_latency_correction_s: 0.0
+
+# --- LiDAR sensor offsets in base_link frame ---
+# Transform: sensor origin (x, y) and heading offset (theta) relative to base_link.
+# Front scanner: pointing forward, offset forward on the robot.
+scan_front_sx:  0.304559
+scan_front_sy: -0.005977
+scan_front_st:  0.019208   # 1.101 deg (from transformations.yaml)
+# Rear scanner: pointing backward (~180° + small yaw), offset rearward.
+scan_rear_sx: -0.302722
+scan_rear_sy: -0.001625
+scan_rear_st: -3.130751   # -179.379 deg (from transformations.yaml)
+
+# --- Map likelihood field ---
+sigma_hit: 0.15      # Gaussian std dev for hit model [m]
+
+# --- Particle filter ---
+n_particles:             3000
+ess_resample_threshold:  0.5     # resample when ESS/N drops below this
+ess_recovery_threshold:  0.02    # inject random particles below this (very conservative — ESS-based recovery backfires)
+recovery_fraction:       0.05    # fraction of particles replaced on recovery
+roughening_pos_m:        0.005   # position jitter after resampling [m]
+roughening_angle_rad:    0.005   # angle jitter after resampling [rad]
+init_spread_pos_m:       0.05    # Gaussian spread around initial pose [m]
+init_spread_angle_rad:   0.05    # Gaussian spread around initial heading [rad]
+init_random_fraction:    0.00    # fraction of particles placed randomly in free space
+
+# --- KLD-sampling (adaptive particle count — Fox 2001) ---
+use_kld_sampling:    true   # enable to adapt N each resample
+kld_bin_size_m:      0.20    # position bin [m]
+kld_bin_size_rad:    0.20    # heading bin [rad] (~11.5°)
+kld_epsilon:         0.05    # KL divergence bound
+kld_min_particles:   200     # floor on drawn count
+kld_max_particles:   5000    # ceiling on drawn count (also initial N when enabled)
+
+# --- Motion model (omnidirectional) ---
+alpha1: 0.005   # rotation noise from rotation
+alpha2: 0.01    # rotation noise from translation magnitude
+alpha3: 0.01    # forward translation noise from translation magnitude
+alpha4: 0.01    # translation noise from rotation
+alpha5: 0.01    # lateral translation noise from translation magnitude
+
+# --- Sensor model (soft EM) ---
+n_rays:       600      # stratified subsampling ray count (across both scanners)
+p_uniform:    0.033    # uniform outlier density (≈ 1/30m)
+z_min:        0.05     # min valid range [m]
+z_max:        30.0     # max valid range [m]
+alpha_prior:  8.0      # Beta(alpha_prior, beta_prior) prior on inlier fraction
+beta_prior:   2.0      # prior mean = 0.8 (biased toward inliers)
+em_iters:     1        # EM iterations per particle per scan
+norm_exponent: 0.57    # exponent for log-weight normalization by n_valid (0.5=sqrt, 0=none)
+
+# --- Odometry-gated updates ---
+update_min_d: 0.0    # minimum linear motion to trigger PF update [m] (0 = always update)
+update_min_a: 0.0    # minimum angular motion to trigger PF update [rad] (0 = always update)
+
+# --- MAP estimate ---
+use_map_estimate:    false   # return highest-weight pre-resample particle instead of post-resample mean
+
+# --- w_slow/w_fast adaptive recovery ---
+use_wslow_wfast:       false
+wslow_alpha:           0.001   # slow EMA (longer memory)
+wfast_alpha:           0.1     # fast EMA (shorter memory)
+wfast_wslow_threshold: 0.1     # inject when w_fast/w_slow < 0.1
+
+# --- z_short sensor component ---
+use_z_short:    true
+lambda_short:   2.0     # exponential decay [1/m]; p_short(z) = lambda*exp(-lambda*z)
+gamma_prior:    1.0     # pseudo-count prior for short-reading fraction
+
+# --- Motion noise floor ---
+min_trans_noise: 0.0    # minimum translation noise stddev [m]
+min_rot_noise:   0.0    # minimum rotation noise stddev [rad]
