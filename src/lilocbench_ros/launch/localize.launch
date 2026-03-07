@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- arguments -->
+  <arg name="sequence"    default="static_0"/>
+  <arg name="bag"         default="/data/static_0/static_0.bag"/>
+  <arg name="map"         default="/data/map_office/map_office.yaml"/>
+  <arg name="output_dir"  default="/output/results"/>
+  <arg name="init_x"      default="9.971633"/>
+  <arg name="init_y"      default="-3.639337"/>
+  <arg name="init_theta"  default="0.025742"/>
+  <arg name="use_sim_time" default="true"/>
+
+  <param name="use_sim_time" value="$(arg use_sim_time)"/>
+
+  <!-- map server -->
+  <node pkg="map_server" type="map_server" name="map_server"
+        args="$(arg map)" output="screen">
+    <param name="frame_id" value="map"/>
+  </node>
+
+  <!-- localizer -->
+  <node pkg="lilocbench_ros" type="localizer_node" name="localizer_node"
+        output="screen" required="false">
+    <rosparam file="$(find lilocbench_ros)/config/params.yaml" command="load"/>
+    <param name="sequence_name"      value="$(arg sequence)"/>
+    <param name="output_dir"         value="$(arg output_dir)"/>
+    <param name="initial_pose_x"     value="$(arg init_x)"/>
+    <param name="initial_pose_y"     value="$(arg init_y)"/>
+    <param name="initial_pose_theta" value="$(arg init_theta)"/>
+  </node>
+
+  <!-- bag playback with 2s delay to let map_server start -->
+  <node pkg="rosbag" type="play" name="rosbag_play" output="screen"
+        args="$(arg bag) --clock --rate 1.0 --delay 2.0"/>
+</launch>

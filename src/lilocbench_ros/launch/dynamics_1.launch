@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<launch>
+  <arg name="launch_rviz" default="true"/>
+  <arg name="output_dir"  default="/output/results"/>
+
+  <!-- Initial pose: update init_x/init_y/init_theta from the dataset's init_pose.txt
+       (x y theta, metres and radians in the map frame). -->
+  <include file="$(find lilocbench_ros)/launch/localize.launch">
+    <arg name="sequence"   value="dynamics_1"/>
+    <arg name="bag"        value="/data/dynamics_1/dynamics_1_no_cams.bag"/>
+    <arg name="map"        value="/data/map_office/map_office.yaml"/>
+    <arg name="output_dir" value="$(arg output_dir)"/>
+    <arg name="init_x"     value="0.0"/>
+    <arg name="init_y"     value="0.0"/>
+    <arg name="init_theta" value="0.0"/>
+  </include>
+
+  <group if="$(arg launch_rviz)">
+    <node pkg="rviz" type="rviz" name="rviz" required="false" output="screen"
+          args="-d $(find lilocbench_ros)/config/default.rviz"/>
+  </group>
+</launch>

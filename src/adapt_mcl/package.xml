@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>adapt_mcl</name>
+  <version>0.1.0</version>
+  <description>
+    Pure C++ particle filter core: likelihood field, motion model, and
+    per-particle soft EM sensor model. No ROS dependencies.
+  </description>
+  <maintainer email="user@example.com">LILocBench</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <build_depend>eigen</build_depend>
+  <test_depend>rostest</test_depend>
+  <test_depend>gtest</test_depend>
+</package>
