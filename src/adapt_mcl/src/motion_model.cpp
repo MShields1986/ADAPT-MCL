@@ -1,6 +1,9 @@
 #include "adapt_mcl/motion_model.hpp"
 
+#include <algorithm>
 #include <cmath>
+#include <execution>
+#include <random>
 
 namespace adapt_mcl {
 
@@ -58,22 +61,29 @@ void MotionModel::predict(std::vector<Particle>& particles,
   var_fwd   = std::max(var_fwd,   min_t2 + 1e-12f);
   var_lat   = std::max(var_lat,   min_t2 + 1e-12f);
 
-  std::normal_distribution<float> n_theta(0.0f, std::sqrt(var_theta));
-  std::normal_distribution<float> n_fwd  (0.0f, std::sqrt(var_fwd));
-  std::normal_distribution<float> n_lat  (0.0f, std::sqrt(var_lat));
+  const float sig_theta = std::sqrt(var_theta);
+  const float sig_fwd   = std::sqrt(var_fwd);
+  const float sig_lat   = std::sqrt(var_lat);
 
-  for (auto& p : particles) {
-    const float fwd = delta_fwd + n_fwd(rng);
-    const float lat = delta_lat + n_lat(rng);
-    const float dth = dtheta   + n_theta(rng);
+  (void)rng;  // per-thread RNGs used below; shared rng no longer needed in inner loop
 
-    // Apply displacement in particle's body frame.
-    const float cp = std::cos(p.theta);
-    const float sp = std::sin(p.theta);
-    p.x     += fwd * cp - lat * sp;
-    p.y     += fwd * sp + lat * cp;
-    p.theta  = normalize_angle(p.theta + dth);
-  }
+  std::for_each(
+      std::execution::par, particles.begin(), particles.end(),
+      [&](Particle& p) {
+        thread_local std::mt19937 tl_rng{std::random_device{}()};
+        thread_local std::normal_distribution<float> nd{0.0f, 1.0f};
+
+        const float fwd = delta_fwd + nd(tl_rng) * sig_fwd;
+        const float lat = delta_lat + nd(tl_rng) * sig_lat;
+        const float dth = dtheta   + nd(tl_rng) * sig_theta;
+
+        // Apply displacement in particle's body frame.
+        const float cp = std::cos(p.theta);
+        const float sp = std::sin(p.theta);
+        p.x     += fwd * cp - lat * sp;
+        p.y     += fwd * sp + lat * cp;
+        p.theta  = normalize_angle(p.theta + dth);
+      });
 }
 
 }  // namespace adapt_mcl

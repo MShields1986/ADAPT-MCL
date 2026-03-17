@@ -18,6 +18,9 @@ struct SoftEmParams {
   bool  use_z_short{false};
   float lambda_short{2.0f};   // exponential decay rate [1/m]
   float gamma_prior{1.0f};    // pseudo-count prior for short-reading fraction
+  // CPD precomputed field for weight update (outlier-aware, map-change robust).
+  // Requires LikelihoodField built with matching cpd_sigma / cpd_w.
+  bool  use_cpd_field{false};
 };
 
 /// Per-particle soft EM sensor model.

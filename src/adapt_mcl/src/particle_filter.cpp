@@ -53,6 +53,115 @@ void ParticleFilter::initialize(const LikelihoodField& field,
   initialized_ = true;
 }
 
+std::tuple<float, float, float> ParticleFilter::initialize_global(
+    const LikelihoodField& field,
+    const std::vector<std::array<float, 2>>& endpoints_bl) {
+  // Fallback: if no scan yet, just keep the existing uniform init unchanged.
+  if (endpoints_bl.empty()) return {0.0f, 0.0f, 0.0f};
+
+  // Use tracking-sized particle count — the LF update on the next scan will
+  // eliminate wrong candidates, so we don't need 100k particles here.
+  int init_n = pf_params_.n_particles;
+  particles_.resize(init_n);
+
+  // Stage 1: primary grid search.
+  // When use_cpd_rerank=true and use_caer_rerank=false, use CPD scoring directly
+  // on the full grid so the true pose is never pre-filtered out by LF.
+  // Otherwise fall back to the standard LF grid search.
+  std::vector<LikelihoodField::PoseCandidate> candidates;
+
+  const bool cpd_primary = pf_params_.use_cpd_rerank && !pf_params_.use_caer_rerank;
+
+  if (cpd_primary) {
+    candidates = field.scan_match_candidates_cpd(
+        endpoints_bl,
+        pf_params_.scan_match_pos_step_m,
+        pf_params_.scan_match_angle_bins,
+        pf_params_.scan_match_top_k,
+        pf_params_.cpd_rerank_n_rays,
+        pf_params_.cpd_sigma,
+        pf_params_.cpd_w);
+  } else {
+    int stage1_top_n = pf_params_.scan_match_top_k;
+    if (pf_params_.use_caer_rerank)
+      stage1_top_n = std::max(stage1_top_n, pf_params_.caer_rerank_top_n);
+    if (pf_params_.use_cpd_rerank)
+      stage1_top_n = std::max(stage1_top_n, pf_params_.cpd_rerank_top_n);
+
+    candidates = field.scan_match_candidates(
+        endpoints_bl,
+        pf_params_.scan_match_pos_step_m,
+        pf_params_.scan_match_angle_bins,
+        stage1_top_n,
+        200);
+
+    // Stage 2: inlier-fraction CAER re-ranking (optional).
+    if (pf_params_.use_caer_rerank) {
+      candidates = field.caer_rerank(candidates, endpoints_bl,
+                                     pf_params_.caer_rerank_n_rays,
+                                     pf_params_.caer_inlier_threshold);
+      int trim_n = pf_params_.use_cpd_rerank ? pf_params_.cpd_rerank_top_n
+                                             : pf_params_.scan_match_top_k;
+      if (static_cast<int>(candidates.size()) > trim_n)
+        candidates.resize(trim_n);
+    }
+
+    // Stage 3: CPD GMM re-ranking (optional, after LF/CAER).
+    if (pf_params_.use_cpd_rerank) {
+      candidates = field.cpd_rerank(candidates, endpoints_bl,
+                                    pf_params_.cpd_rerank_n_rays,
+                                    pf_params_.cpd_sigma,
+                                    pf_params_.cpd_w);
+      if (static_cast<int>(candidates.size()) > pf_params_.scan_match_top_k)
+        candidates.resize(pf_params_.scan_match_top_k);
+    }
+  }
+
+  // Distribute ALL particles equally across top-K candidates.
+  // The LF update on the next scan will eliminate wrong candidates naturally —
+  // we don't need a uniform random fill as insurance.
+  const int n_cands   = static_cast<int>(candidates.size());
+  const int per_cand  = init_n / n_cands;
+  const int remainder = init_n % n_cands;
+
+  std::normal_distribution<float> pos_noise(0.0f, pf_params_.init_spread_pos_m);
+  std::normal_distribution<float> ang_noise(0.0f, pf_params_.init_spread_angle_rad);
+
+  int pi = 0;
+  for (int ci = 0; ci < n_cands && pi < init_n; ++ci) {
+    int count = per_cand + (ci < remainder ? 1 : 0);
+    const auto& c = candidates[ci];
+    for (int k = 0; k < count && pi < init_n; ++k, ++pi) {
+      particles_[pi].x          = c.x + pos_noise(rng_);
+      particles_[pi].y          = c.y + pos_noise(rng_);
+      particles_[pi].theta      = normalize_angle(c.theta + ang_noise(rng_));
+      particles_[pi].log_weight = 0.0f;
+      particles_[pi].alpha      = 0.9f;
+    }
+  }
+
+  initialized_ = true;
+  last_global_candidates_ = candidates;
+  return candidates.empty()
+      ? std::make_tuple(0.0f, 0.0f, 0.0f)
+      : std::make_tuple(candidates[0].x, candidates[0].y, candidates[0].theta);
+}
+
+void ParticleFilter::initialize_tracking(const LikelihoodField& /*field*/,
+                                          float x, float y, float theta) {
+  particles_.resize(pf_params_.n_particles);
+  std::normal_distribution<float> pos_noise(0.0f, pf_params_.init_spread_pos_m);
+  std::normal_distribution<float> ang_noise(0.0f, pf_params_.init_spread_angle_rad);
+  for (auto& p : particles_) {
+    p.x          = x + pos_noise(rng_);
+    p.y          = y + pos_noise(rng_);
+    p.theta      = normalize_angle(theta + ang_noise(rng_));
+    p.log_weight = 0.0f;
+    p.alpha      = 0.9f;
+  }
+  initialized_ = true;
+}
+
 std::tuple<float, float, float> ParticleFilter::update(
     const LikelihoodField& field,
     const std::vector<std::array<float, 2>>& endpoints_bl,
@@ -75,6 +184,17 @@ std::tuple<float, float, float> ParticleFilter::update(
 
   // 2. Sensor update (weight).
   sensor_model_.compute_weights(particles_, endpoints_bl, field);
+
+  // 2b. Temperature annealing: scale log-weights by beta to slow convergence
+  //     during global localization, preventing instant collapse to aliased pose.
+  if (pf_params_.init_temperature_steps > 0 &&
+      scan_step_ < pf_params_.init_temperature_steps) {
+    float t = static_cast<float>(scan_step_) /
+              static_cast<float>(pf_params_.init_temperature_steps);
+    float beta = pf_params_.init_temperature + (1.0f - pf_params_.init_temperature) * t;
+    for (auto& p : particles_) p.log_weight *= beta;
+  }
+  ++scan_step_;
 
   // 3. Normalize weights.
   double log_Z = normalize_log_weights();
@@ -163,6 +283,16 @@ std::tuple<float, float, float> ParticleFilter::update(
     double uniform_log_w = -std::log(static_cast<double>(particles_.size()));
     for (auto& p : particles_) {
       p.log_weight = uniform_log_w;
+    }
+  }
+
+  // 7. Global-init phase: augmented MCL injection (Fox 2003), step-count triggered.
+  if (pf_params_.global_init_steps > 0 && scan_step_ < pf_params_.global_init_steps) {
+    ++scan_step_;
+    int n_inject = static_cast<int>(
+        particles_.size() * pf_params_.global_init_injection_frac);
+    if (n_inject > 0) {
+      inject_random_particles(field, n_inject);
     }
   }
 
@@ -293,6 +423,22 @@ void ParticleFilter::resample_kld(const LikelihoodField& /*field*/) {
     if (drawn + 1 >= target) break;
   }
   particles_ = std::move(out);
+}
+
+void ParticleFilter::inject_random_particles(const LikelihoodField& field, int n) {
+  std::vector<int> order(particles_.size());
+  std::iota(order.begin(), order.end(), 0);
+  std::partial_sort(order.begin(), order.begin() + n, order.end(),
+                    [&](int a, int b) {
+                      return particles_[a].log_weight < particles_[b].log_weight;
+                    });
+  const double ulw = -std::log(static_cast<double>(particles_.size()));
+  for (int i = 0; i < n; ++i) {
+    auto [rx, ry, rtheta] = field.sample_free_pose(rng_);
+    auto& p = particles_[order[i]];
+    p.x = rx; p.y = ry; p.theta = rtheta; p.log_weight = ulw;
+  }
+  (void)normalize_log_weights();
 }
 
 double ParticleFilter::normalize_log_weights() {

@@ -5,9 +5,48 @@
   <arg name="bag"         default="/data/static_0/static_0.bag"/>
   <arg name="map"         default="/data/map_office/map_office.yaml"/>
   <arg name="output_dir"  default="/output/results"/>
-  <arg name="init_x"      default="9.971633"/>
-  <arg name="init_y"      default="-3.639337"/>
-  <arg name="init_theta"  default="0.025742"/>
+  <!-- Global localization: particles spread uniformly across free map space.
+       Set init_random_fraction=0.0 only if you want pose tracking from a known pose. -->
+  <arg name="init_random_fraction" default="1.0"/>
+  <!-- kld_max_particles: needs ~50000+ to cover map in global init mode. -->
+  <arg name="kld_max_particles" default="100000"/>
+  <!-- Global-init phase: inject fresh free-space particles for this many update steps.
+       0 = disabled (pose tracking). Set to ~60 for global localization sequences. -->
+  <arg name="global_init_steps"          default="0"/>
+  <arg name="global_init_injection_frac" default="0.05"/>
+  <arg name="use_scan_match_seed"        default="true"/>
+  <arg name="scan_match_pos_step_m"      default="0.4"/>
+  <arg name="scan_match_angle_bins"      default="48"/>
+  <arg name="scan_match_top_k"           default="20"/>
+  <arg name="scan_match_candidate_frac"  default="0.5"/>
+  <arg name="use_caer_rerank"            default="false"/>
+  <arg name="caer_rerank_top_n"          default="200"/>
+  <arg name="caer_rerank_n_rays"         default="200"/>
+  <arg name="caer_inlier_threshold"      default="0.30"/>
+  <arg name="use_cpd_rerank"             default="true"/>
+  <arg name="cpd_rerank_top_n"           default="200"/>
+  <arg name="cpd_rerank_n_rays"          default="200"/>
+  <arg name="cpd_sigma"                  default="0.10"/>
+  <arg name="cpd_w"                      default="0.20"/>
+  <!-- Trajectory-consistent global init: dead-reckon top-K candidates for N scans,
+       pick best by accumulated CPD score. 0 = disabled (use single-scan seeding). -->
+  <arg name="trajectory_init_scans"      default="0"/>
+  <arg name="trajectory_n_rays"          default="200"/>
+  <!-- Ray-swept free-space: subsample rays per scan, penalise blocked intermediate cells.
+       free_space_weight=0 disables the ray check (pure CPD scoring, default). -->
+  <arg name="trajectory_subsample"       default="50"/>
+  <arg name="free_space_weight"          default="0.0"/>
+  <arg name="free_space_penalty"         default="1.0"/>
+  <!-- Temperature annealing on first N scans (0 = disabled) -->
+  <arg name="init_temperature_steps"     default="0"/>
+  <arg name="init_temperature"           default="0.05"/>
+  <!-- CPD field for ongoing weight updates -->
+  <arg name="use_cpd_field"              default="false"/>
+  <!-- Offset into the bag to start playback from [seconds].  0 = from the start.
+       Non-zero values test global-init robustness: the robot is already at a
+       mid-sequence position, so any tracker relying on a fixed t=0 initial
+       pose will fail unless it can re-localise from scratch. -->
+  <arg name="bag_start_s" default="0"/>
   <arg name="use_sim_time" default="true"/>
 
   <param name="use_sim_time" value="$(arg use_sim_time)"/>
@@ -22,14 +61,37 @@
   <node pkg="lilocbench_ros" type="localizer_node" name="localizer_node"
         output="screen" required="false">
     <rosparam file="$(find lilocbench_ros)/config/params.yaml" command="load"/>
-    <param name="sequence_name"      value="$(arg sequence)"/>
-    <param name="output_dir"         value="$(arg output_dir)"/>
-    <param name="initial_pose_x"     value="$(arg init_x)"/>
-    <param name="initial_pose_y"     value="$(arg init_y)"/>
-    <param name="initial_pose_theta" value="$(arg init_theta)"/>
+    <param name="sequence_name"        value="$(arg sequence)"/>
+    <param name="output_dir"           value="$(arg output_dir)"/>
+    <param name="init_random_fraction"      value="$(arg init_random_fraction)"/>
+    <param name="kld_max_particles"         value="$(arg kld_max_particles)"/>
+    <param name="global_init_steps"         value="$(arg global_init_steps)"/>
+    <param name="global_init_injection_frac" value="$(arg global_init_injection_frac)"/>
+    <param name="use_scan_match_seed"        value="$(arg use_scan_match_seed)"/>
+    <param name="scan_match_pos_step_m"      value="$(arg scan_match_pos_step_m)"/>
+    <param name="scan_match_angle_bins"      value="$(arg scan_match_angle_bins)"/>
+    <param name="scan_match_top_k"           value="$(arg scan_match_top_k)"/>
+    <param name="scan_match_candidate_frac"  value="$(arg scan_match_candidate_frac)"/>
+    <param name="use_caer_rerank"            value="$(arg use_caer_rerank)"/>
+    <param name="caer_rerank_top_n"          value="$(arg caer_rerank_top_n)"/>
+    <param name="caer_rerank_n_rays"         value="$(arg caer_rerank_n_rays)"/>
+    <param name="caer_inlier_threshold"      value="$(arg caer_inlier_threshold)"/>
+    <param name="use_cpd_rerank"             value="$(arg use_cpd_rerank)"/>
+    <param name="cpd_rerank_top_n"           value="$(arg cpd_rerank_top_n)"/>
+    <param name="cpd_rerank_n_rays"          value="$(arg cpd_rerank_n_rays)"/>
+    <param name="cpd_sigma"                  value="$(arg cpd_sigma)"/>
+    <param name="cpd_w"                      value="$(arg cpd_w)"/>
+    <param name="trajectory_init_scans"      value="$(arg trajectory_init_scans)"/>
+    <param name="trajectory_n_rays"          value="$(arg trajectory_n_rays)"/>
+    <param name="trajectory_subsample"       value="$(arg trajectory_subsample)"/>
+    <param name="free_space_weight"          value="$(arg free_space_weight)"/>
+    <param name="free_space_penalty"         value="$(arg free_space_penalty)"/>
+    <param name="init_temperature_steps"     value="$(arg init_temperature_steps)"/>
+    <param name="init_temperature"           value="$(arg init_temperature)"/>
+    <param name="use_cpd_field"              value="$(arg use_cpd_field)"/>
   </node>
 
   <!-- bag playback with 2s delay to let map_server start -->
-  <node pkg="rosbag" type="play" name="rosbag_play" output="screen"
-        args="$(arg bag) --clock --rate 1.0 --delay 2.0"/>
+  <node pkg="rosbag" type="play" name="rosbag_play" output="screen" required="true"
+        args="$(arg bag) --clock --rate 4.0 --delay 2.0 --start $(arg bag_start_s)"/>
 </launch>

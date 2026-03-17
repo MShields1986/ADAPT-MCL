@@ -12,12 +12,6 @@ map_topic:         "/map"
 sequence_name: "static_0"          # must match LILocBench sequence name
 output_dir: "/output/results"      # directory where run_*.txt files are written
 
-# --- Initial pose (map frame, metres / radians) ---
-# Set from data/<seq>/init_pose.txt (x y theta).
-initial_pose_x:      0.0
-initial_pose_y:      0.0
-initial_pose_theta:  0.0
-
 # --- Timing ---
 # Positive = scan stamped early (add offset), negative = stamped late (subtract).
 # Tune against static sequences. A 30ms latency at 0.5m/s gives ~1.5cm error.
@@ -46,7 +40,7 @@ roughening_pos_m:        0.005   # position jitter after resampling [m]
 roughening_angle_rad:    0.005   # angle jitter after resampling [rad]
 init_spread_pos_m:       0.05    # Gaussian spread around initial pose [m]
 init_spread_angle_rad:   0.05    # Gaussian spread around initial heading [rad]
-init_random_fraction:    0.00    # fraction of particles placed randomly in free space
+init_random_fraction:    1.00    # 1.0 = global localization (uniform over free space)
 
 # --- KLD-sampling (adaptive particle count — Fox 2001) ---
 use_kld_sampling:    true   # enable to adapt N each resample
@@ -54,7 +48,7 @@ kld_bin_size_m:      0.20    # position bin [m]
 kld_bin_size_rad:    0.20    # heading bin [rad] (~11.5°)
 kld_epsilon:         0.05    # KL divergence bound
 kld_min_particles:   200     # floor on drawn count
-kld_max_particles:   5000    # ceiling on drawn count (also initial N when enabled)
+kld_max_particles:   100000  # ceiling on drawn count (also initial N when enabled)
 
 # --- Motion model (omnidirectional) ---
 alpha1: 0.005   # rotation noise from rotation
@@ -79,6 +73,41 @@ update_min_a: 0.0    # minimum angular motion to trigger PF update [rad] (0 = al
 
 # --- MAP estimate ---
 use_map_estimate:    false   # return highest-weight pre-resample particle instead of post-resample mean
+
+# --- Global-init phase: augmented MCL injection ---
+# Set global_init_steps > 0 for global localization sequences (100k particles).
+# Leave at 0 for pose-tracking sequences (known initial pose).
+global_init_steps:          0     # number of update steps to inject fresh particles
+global_init_injection_frac: 0.05  # fraction of particles replaced per step
+
+# --- Scan-match seed for global localization ---
+# When use_scan_match_seed=true (set in global-init launch files), the first scan
+# is used to score a coarse pose grid and seed scan_match_candidate_frac of particles
+# near the top-K highest-scoring candidates (rest remain uniform free-space).
+use_scan_match_seed:       true   # enabled: CPD primary global init on first scan
+scan_match_pos_step_m:     0.4    # coarse grid step [m]
+scan_match_angle_bins:     48     # 48 bins → 7.5° heading resolution
+scan_match_top_k:          20     # top-K candidates to seed around (final top-K after CAER)
+scan_match_candidate_frac: 0.5    # fraction of N seeded (rest = uniform)
+
+# --- CAER re-ranking for global localization ---
+# Two-stage scoring: Stage 1 = likelihood-field top-N, Stage 2 = inlier-fraction CAER.
+# Enabled in global-localization launch files (static_0, dynamics_0).
+use_caer_rerank:         false  # override to true in global-init launch files
+caer_rerank_top_n:       200    # Stage 1 keeps top-N for CAER re-ranking
+caer_rerank_n_rays:      200    # rays per candidate in CAER scoring
+caer_inlier_threshold:   0.30   # |r_expected - r_actual| < thresh = inlier [m]
+
+# --- CPD re-ranking for global localization ---
+# Outlier-aware GMM scoring: scan points in map-changed regions are absorbed by
+# the uniform outlier component (w/area) rather than penalising the true pose.
+# Recommended for lt_changes sequences where standard LF favours aliased poses.
+# Set use_scan_match_seed=true alongside this.
+use_cpd_rerank:       true   # CPD primary global init (outlier-aware GMM vs standard LF)
+cpd_rerank_top_n:     200    # LF top-N passed into CPD rescoring
+cpd_rerank_n_rays:    200    # rays per candidate in CPD scoring
+cpd_sigma:            0.10   # CPD Gaussian bandwidth [m] (independent of sigma_hit)
+cpd_w:                0.20   # CPD uniform outlier weight (0=pure GMM, 1=all outlier)
 
 # --- w_slow/w_fast adaptive recovery ---
 use_wslow_wfast:       false

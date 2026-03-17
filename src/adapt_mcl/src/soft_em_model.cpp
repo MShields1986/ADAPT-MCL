@@ -27,7 +27,8 @@ void SoftEmModel::compute_weights(
 
   const float p_unif = params_.p_uniform;
 
-  const bool use_z_short = params_.use_z_short;
+  const bool use_z_short  = params_.use_z_short;
+  const bool use_cpd_field = params_.use_cpd_field;
 
   std::for_each(
       std::execution::par, particles.begin(), particles.end(),
@@ -47,7 +48,8 @@ void SoftEmModel::compute_weights(
           // Transform base_link endpoint to map frame.
           float ex = p.x + cos_t * ep[0] - sin_t * ep[1];
           float ey = p.y + sin_t * ep[0] + cos_t * ep[1];
-          liks[n_valid] = field.get_likelihood(ex, ey);
+          liks[n_valid] = use_cpd_field ? field.get_cpd_likelihood(ex, ey)
+                                        : field.get_likelihood(ex, ey);
           zs[n_valid]   = std::sqrt(ep[0]*ep[0] + ep[1]*ep[1]);
           ++n_valid;
         }

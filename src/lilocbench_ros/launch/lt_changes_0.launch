@@ -4,13 +4,12 @@
   <arg name="output_dir"  default="/output/results"/>
 
   <include file="$(find lilocbench_ros)/launch/localize.launch">
-    <arg name="sequence"   value="lt_changes_0"/>
-    <arg name="bag"        value="/data/lt_changes_0/lt_changes_0_no_cams.bag"/>
-    <arg name="map"        value="/data/map_office/map_office.yaml"/>
-    <arg name="output_dir" value="$(arg output_dir)"/>
-    <arg name="init_x"     value="-2.738933"/>
-    <arg name="init_y"     value="-4.032920"/>
-    <arg name="init_theta" value="0.037187"/>
+    <arg name="sequence"              value="lt_changes_0"/>
+    <arg name="bag"                   value="/data/lt_changes_0/lt_changes_0_no_cams.bag"/>
+    <arg name="map"                   value="/data/map_office/map_office.yaml"/>
+    <arg name="output_dir"            value="$(arg output_dir)"/>
+    <arg name="trajectory_init_scans" value="50"/>
+    <arg name="trajectory_n_rays"     value="200"/>
   </include>
 
   <group if="$(arg launch_rviz)">

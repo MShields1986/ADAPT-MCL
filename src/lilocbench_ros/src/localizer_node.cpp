@@ -1,7 +1,9 @@
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <memory>
 #include <mutex>
+#include <numeric>
 #include <string>
 #include <vector>
 
@@ -78,9 +80,6 @@ class LocalizerNode {
     pnh.param<std::string>("sequence_name", sequence_name_, "static_0");
     pnh.param<std::string>("output_dir",    output_dir_,    "/output/results");
 
-    pnh.param("initial_pose_x",     initial_x_,     0.0f);
-    pnh.param("initial_pose_y",     initial_y_,     0.0f);
-    pnh.param("initial_pose_theta", initial_theta_,  0.0f);
     pnh.param("scan_latency_correction_s", scan_latency_correction_, 0.0);
 
     // Sensor offsets
@@ -133,6 +132,30 @@ class LocalizerNode {
     pnh.param("update_min_d", update_min_d_, 0.0f);
     pnh.param("update_min_a", update_min_a_, 0.0f);
 
+    // Global-init phase: augmented MCL injection
+    pnh.param("global_init_steps",          pf_params_.global_init_steps,          0);
+    pnh.param("global_init_injection_frac", pf_params_.global_init_injection_frac, 0.05f);
+
+    // Scan-match seed for global localization
+    pnh.param<bool>("use_scan_match_seed",       pf_params_.use_scan_match_seed,        false);
+    pnh.param("scan_match_pos_step_m",           pf_params_.scan_match_pos_step_m,      0.4f);
+    pnh.param("scan_match_angle_bins",           pf_params_.scan_match_angle_bins,      48);
+    pnh.param("scan_match_top_k",                pf_params_.scan_match_top_k,           20);
+    pnh.param("scan_match_candidate_frac",       pf_params_.scan_match_candidate_frac,  0.5f);
+
+    // CAER re-ranking for global localization
+    pnh.param<bool>("use_caer_rerank",       pf_params_.use_caer_rerank,       false);
+    pnh.param("caer_rerank_top_n",           pf_params_.caer_rerank_top_n,     200);
+    pnh.param("caer_rerank_n_rays",          pf_params_.caer_rerank_n_rays,    200);
+    pnh.param("caer_inlier_threshold",       pf_params_.caer_inlier_threshold, 0.30f);
+
+    // CPD re-ranking for global localization (outlier-aware GMM scoring)
+    pnh.param<bool>("use_cpd_rerank",    pf_params_.use_cpd_rerank,    false);
+    pnh.param("cpd_rerank_top_n",        pf_params_.cpd_rerank_top_n,  200);
+    pnh.param("cpd_rerank_n_rays",       pf_params_.cpd_rerank_n_rays, 200);
+    pnh.param("cpd_sigma",               pf_params_.cpd_sigma,         0.10f);
+    pnh.param("cpd_w",                   pf_params_.cpd_w,             0.20f);
+
     // w_slow/w_fast adaptive recovery
     pnh.param<bool>("use_map_estimate",     pf_params_.use_map_estimate,      false);
     pnh.param<bool>("use_wslow_wfast",      pf_params_.use_wslow_wfast,       false);
@@ -144,6 +167,23 @@ class LocalizerNode {
     pnh.param<bool>("use_z_short",  em_params_.use_z_short,  false);
     pnh.param("lambda_short",       em_params_.lambda_short,  2.0f);
     pnh.param("gamma_prior",        em_params_.gamma_prior,   1.0f);
+
+    // CPD precomputed field for ongoing weight updates
+    pnh.param<bool>("use_cpd_field", em_params_.use_cpd_field, false);
+
+    // Temperature annealing for global localization convergence
+    pnh.param("init_temperature_steps", pf_params_.init_temperature_steps, 0);
+    pnh.param("init_temperature",       pf_params_.init_temperature,       0.05f);
+
+    // Trajectory-consistent global init: accumulate N scans before committing.
+    // Each top-K candidate is dead-reckoned independently; best total CPD score wins.
+    pnh.param("trajectory_init_scans", trajectory_init_scans_, 0);
+    pnh.param("trajectory_n_rays",     trajectory_n_rays_,     100);
+
+    // Ray-swept free-space: subsample rays per scan, penalise blocked intermediate cells.
+    pnh.param("trajectory_subsample",  trajectory_subsample_,  50);
+    pnh.param("free_space_weight",     free_space_weight_,     0.3f);
+    pnh.param("free_space_penalty",    free_space_penalty_,    1.0f);
 
     // Motion noise floor
     pnh.param("min_trans_noise", motion_params_.min_trans_noise, 0.0f);
@@ -167,19 +207,26 @@ class LocalizerNode {
     info.height     = static_cast<int>(msg->info.height);
 
     std::vector<int8_t> data(msg->data.begin(), msg->data.end());
+    // Build CPD field if needed by ongoing weight updates or trajectory scoring.
+    bool need_cpd = em_params_.use_cpd_field || pf_params_.use_scan_match_seed;
+    float cpd_sigma_field = need_cpd ? pf_params_.cpd_sigma : 0.0f;
+    float cpd_w_field     = need_cpd ? pf_params_.cpd_w     : 0.0f;
     likelihood_field_ = std::make_shared<adapt_mcl::LikelihoodField>(
-        info, data, sigma_hit_);
+        info, data, sigma_hit_, cpd_sigma_field, cpd_w_field);
 
     pf_ = std::make_shared<adapt_mcl::ParticleFilter>(
         pf_params_, motion_params_, em_params_);
-    pf_->initialize(*likelihood_field_, initial_x_, initial_y_, initial_theta_);
-    est_x_ = initial_x_; est_y_ = initial_y_; est_theta_ = initial_theta_;
+    pf_->initialize(*likelihood_field_, 0.0f, 0.0f, 0.0f);
+
+    if (pf_params_.use_scan_match_seed) {
+      global_init_pending_ = true;
+      ROS_INFO("Scan-match seed enabled — will re-init on first scan.");
+    }
 
     std::string tum_path = output_dir_ + "/" + sequence_name_ + "/run_1.txt";
     logger_ = std::make_unique<TumLogger>(tum_path);
 
-    ROS_INFO("PF initialized at (%.3f, %.3f, %.3f°)",
-             initial_x_, initial_y_, initial_theta_ * 180.0f / M_PI);
+    ROS_INFO("PF initialized (global localization mode).");
   }
 
   // ------------------------------------------------------------------ initialpose
@@ -190,17 +237,17 @@ class LocalizerNode {
       return;
     }
     const auto& p = msg->pose.pose;
-    initial_x_ = static_cast<float>(p.position.x);
-    initial_y_ = static_cast<float>(p.position.y);
+    float rx = static_cast<float>(p.position.x);
+    float ry = static_cast<float>(p.position.y);
     float siny = 2.0f * (p.orientation.w * p.orientation.z
                          + p.orientation.x * p.orientation.y);
     float cosy = 1.0f - 2.0f * (p.orientation.y * p.orientation.y
                                  + p.orientation.z * p.orientation.z);
-    initial_theta_ = std::atan2(siny, cosy);
-    pf_->initialize(*likelihood_field_, initial_x_, initial_y_, initial_theta_);
-    est_x_ = initial_x_; est_y_ = initial_y_; est_theta_ = initial_theta_;
+    float rtheta = std::atan2(siny, cosy);
+    pf_->initialize(*likelihood_field_, rx, ry, rtheta);
+    est_x_ = rx; est_y_ = ry; est_theta_ = rtheta;
     ROS_INFO("Re-initialized at /initialpose (%.3f, %.3f, %.1f°)",
-             initial_x_, initial_y_, initial_theta_ * 180.0f / M_PI);
+             rx, ry, rtheta * 180.0f / M_PI);
   }
 
   // ------------------------------------------------------------------ odom / rear scan (cached)
@@ -264,6 +311,174 @@ class LocalizerNode {
     }
 
     if (endpoints_bl.empty()) return;
+
+    // On first scan with scan-match seed: overwrite uniform init with scan-seeded init.
+    // Then skip the update for this scan so particles maintain the seeded distribution.
+    if (global_init_pending_) {
+      ROS_INFO("Global init: CPD search on first scan...");
+      auto [ix, iy, it] = pf_->initialize_global(*likelihood_field_, endpoints_bl);
+      global_init_pending_ = false;
+      est_x_ = ix; est_y_ = iy; est_theta_ = it;
+
+      if (trajectory_init_scans_ > 0) {
+        // Start trajectory-consistent init: dead-reckon all top-K candidates
+        // independently for N scans, pick the one with best accumulated score.
+        const auto& cands = pf_->last_global_candidates();
+        int nc = static_cast<int>(cands.size());
+        traj_pred_poses_.resize(nc);
+        traj_log_scores_.assign(nc, 0.0f);
+        for (int i = 0; i < nc; ++i)
+          traj_pred_poses_[i] = {cands[i].x, cands[i].y, cands[i].theta};
+        trajectory_init_pending_ = true;
+        trajectory_scan_count_   = 0;
+        local_dx_ = 0.0f; local_dy_ = 0.0f; local_dt_ = 0.0f;
+        local_ray_pairs_.clear();
+        ROS_INFO("Trajectory init: accumulating %d scans across %d candidates.",
+                 trajectory_init_scans_, nc);
+      } else {
+        ROS_INFO("Global init complete — top candidate (%.3f, %.3f, %.1f°), "
+                 "particles spread across top-%d candidates, LF will select on next scan.",
+                 est_x_, est_y_, est_theta_ * 180.0f / M_PI,
+                 pf_params_.scan_match_top_k);
+      }
+
+      if (logger_) logger_->log(scan_time, est_x_, est_y_, est_theta_);
+      publish_pose(front_scan->header.stamp, est_x_, est_y_, est_theta_, ox, oy, otheta);
+      if (++pub_counter_ % 5 == 0) publish_cloud(front_scan->header.stamp);
+      prev_ox_ = ox; prev_oy_ = oy; prev_otheta_ = otheta;
+      return;
+    }
+
+    // Trajectory-consistent init: dead-reckon candidates, accumulate scores.
+    if (trajectory_init_pending_) {
+      const int n_total = static_cast<int>(endpoints_bl.size());
+      const int nr = std::min(trajectory_n_rays_, n_total);
+
+      // Differential-drive dead-reckoning deltas from odom.
+      float ddx = ox - prev_ox_;
+      float ddy = oy - prev_oy_;
+      float trans = std::sqrt(ddx*ddx + ddy*ddy);
+      float rot1  = (trans > 1e-4f)
+                    ? adapt_mcl::normalize_angle(std::atan2(ddy, ddx) - prev_otheta_)
+                    : 0.0f;
+      float rot2  = adapt_mcl::normalize_angle(
+                        adapt_mcl::normalize_angle(otheta - prev_otheta_) - rot1);
+
+      // Update shared local dead-reckoning frame (starts at 0,0,0 at init time).
+      local_dx_ += trans * std::cos(local_dt_ + rot1);
+      local_dy_ += trans * std::sin(local_dt_ + rot1);
+      local_dt_ = adapt_mcl::normalize_angle(local_dt_ + rot1 + rot2);
+
+      // Subsample endpoints and transform to local frame, append to ray buffer.
+      {
+        const int ns = std::min(trajectory_subsample_, n_total);
+        float lcos = std::cos(local_dt_), lsin = std::sin(local_dt_);
+        for (int ri = 0; ri < ns; ++ri) {
+          int idx = static_cast<int>(static_cast<float>(ri) / ns * n_total);
+          const auto& ep = endpoints_bl[idx];
+          float lx_ep = local_dx_ + lcos * ep[0] - lsin * ep[1];
+          float ly_ep = local_dy_ + lsin * ep[0] + lcos * ep[1];
+          local_ray_pairs_.push_back({{local_dx_, local_dy_}, {lx_ep, ly_ep}});
+        }
+      }
+
+      int nc = static_cast<int>(traj_pred_poses_.size());
+      for (int ci = 0; ci < nc; ++ci) {
+        auto& [cx, cy, ct] = traj_pred_poses_[ci];
+        // Apply motion deterministically (no noise).
+        cx += trans * std::cos(ct + rot1);
+        cy += trans * std::sin(ct + rot1);
+        ct = adapt_mcl::normalize_angle(ct + rot1 + rot2);
+
+        // Score current scan at this candidate's predicted pose using CPD field.
+        float log_s = 0.0f;
+        float ccos = std::cos(ct), csin = std::sin(ct);
+        for (int ri = 0; ri < nr; ++ri) {
+          int idx = static_cast<int>(static_cast<float>(ri) / nr * n_total);
+          const auto& ep = endpoints_bl[idx];
+          float ex = cx + ccos * ep[0] - csin * ep[1];
+          float ey = cy + csin * ep[0] + ccos * ep[1];
+          log_s += std::log(std::max(likelihood_field_->get_cpd_likelihood(ex, ey), 1e-6f));
+        }
+        traj_log_scores_[ci] += log_s;
+      }
+
+      prev_ox_ = ox; prev_oy_ = oy; prev_otheta_ = otheta;
+
+      int best;
+      if (++trajectory_scan_count_ >= trajectory_init_scans_) {
+        // Final scan: compute combined CPD scan score + ray-swept free-space score.
+        const auto& init_cands = pf_->last_global_candidates();
+        std::vector<float> combined(nc);
+        for (int ci = 0; ci < nc; ++ci) {
+          float cx0 = init_cands[ci].x, cy0 = init_cands[ci].y, ct0 = init_cands[ci].theta;
+          float cos_ct = std::cos(ct0), sin_ct = std::sin(ct0);
+          float scan_score = 0.0f, ray_score = 0.0f;
+          for (const auto& rp : local_ray_pairs_) {
+            // Endpoint CPD likelihood in global frame.
+            float gx_ep = cx0 + cos_ct * rp.endpoint[0] - sin_ct * rp.endpoint[1];
+            float gy_ep = cy0 + sin_ct * rp.endpoint[0] + cos_ct * rp.endpoint[1];
+            scan_score += std::log(std::max(
+                likelihood_field_->get_cpd_likelihood(gx_ep, gy_ep), 1e-6f));
+            // Ray march from robot to endpoint; count blocked intermediate cells.
+            float gx_r = cx0 + cos_ct * rp.robot[0] - sin_ct * rp.robot[1];
+            float gy_r = cy0 + sin_ct * rp.robot[0] + cos_ct * rp.robot[1];
+            float dx = gx_ep - gx_r, dy = gy_ep - gy_r;
+            float dist = std::sqrt(dx*dx + dy*dy);
+            int n_steps = static_cast<int>(dist / ray_step_m_);
+            if (n_steps > 1) {
+              float ux = dx / dist, uy = dy / dist;
+              for (int s = 1; s < n_steps; ++s) {
+                float x = gx_r + s * ray_step_m_ * ux;
+                float y = gy_r + s * ray_step_m_ * uy;
+                if (likelihood_field_->is_occupied(x, y))
+                  ray_score -= free_space_penalty_;
+              }
+            }
+          }
+          combined[ci] = (1.0f - free_space_weight_) * scan_score
+                       + free_space_weight_ * ray_score;
+        }
+        best = static_cast<int>(
+            std::max_element(combined.begin(), combined.end()) - combined.begin());
+        est_x_ = traj_pred_poses_[best][0];
+        est_y_ = traj_pred_poses_[best][1];
+        est_theta_ = traj_pred_poses_[best][2];
+        // Log top-3 candidates for diagnostics.
+        {
+          std::vector<int> order(nc);
+          std::iota(order.begin(), order.end(), 0);
+          std::partial_sort(order.begin(), order.begin() + std::min(3, nc), order.end(),
+                            [&](int a, int b){ return combined[a] > combined[b]; });
+          for (int k = 0; k < std::min(3, nc); ++k) {
+            int ci = order[k];
+            const auto& ic = init_cands[ci];
+            ROS_INFO("  traj rank%d: init=(%.2f,%.2f,%.1f°) combined=%.1f",
+                     k+1, ic.x, ic.y, ic.theta * 180.0f / M_PI, combined[ci]);
+          }
+        }
+        ROS_INFO("Trajectory init done — committed to candidate %d "
+                 "(%.3f, %.3f, %.1f°) after %d scans, %zu ray-pairs.",
+                 best, est_x_, est_y_, est_theta_ * 180.0f / M_PI,
+                 trajectory_init_scans_, local_ray_pairs_.size());
+        pf_->initialize_tracking(*likelihood_field_, est_x_, est_y_, est_theta_);
+        trajectory_init_pending_ = false;
+        local_ray_pairs_.clear();
+      } else {
+        // Intermediate: use incremental CPD score for display.
+        best = static_cast<int>(
+            std::max_element(traj_log_scores_.begin(), traj_log_scores_.end())
+            - traj_log_scores_.begin());
+        est_x_ = traj_pred_poses_[best][0];
+        est_y_ = traj_pred_poses_[best][1];
+        est_theta_ = traj_pred_poses_[best][2];
+      }
+
+      if (logger_) logger_->log(scan_time, est_x_, est_y_, est_theta_);
+      publish_pose(front_scan->header.stamp, est_x_, est_y_, est_theta_, ox, oy, otheta);
+      if (++pub_counter_ % 5 == 0) publish_cloud(front_scan->header.stamp);
+      return;
+    }
 
     // Odom-gated update.
     float ddx = ox - prev_ox_;
@@ -377,7 +592,6 @@ class LocalizerNode {
 
   std::string scan_front_topic_, scan_rear_topic_, odom_topic_, map_topic_;
   std::string sequence_name_, output_dir_;
-  float initial_x_{0.0f}, initial_y_{0.0f}, initial_theta_{0.0f};
   double scan_latency_correction_{0.0};
   float sigma_hit_{0.03f};
 
@@ -398,12 +612,33 @@ class LocalizerNode {
 
   float prev_ox_{0.0f}, prev_oy_{0.0f}, prev_otheta_{0.0f};
   bool  odom_initialized_{false};
+  bool  global_init_pending_{false};
   int   pub_counter_{0};
 
   // Cached pose estimate (updated only when odom gate opens).
   float est_x_{0.0f}, est_y_{0.0f}, est_theta_{0.0f};
   float update_min_d_{0.0f};    // [m] odom gate threshold
   float update_min_a_{0.0f};    // [rad] odom gate threshold
+
+  // Trajectory-consistent global init state
+  bool  trajectory_init_pending_{false};
+  int   trajectory_scan_count_{0};
+  int   trajectory_init_scans_{0};
+  int   trajectory_n_rays_{100};
+  std::vector<std::array<float, 3>> traj_pred_poses_;   // per-candidate (x, y, theta)
+  std::vector<float>                traj_log_scores_;   // per-candidate accumulated score
+
+  // Ray-swept free-space: shared local dead-reckoning frame + ray buffer.
+  struct RayPair {
+    std::array<float, 2> robot;     // (lx, ly) robot position in local frame
+    std::array<float, 2> endpoint;  // (lx, ly) scan endpoint in local frame
+  };
+  std::vector<RayPair> local_ray_pairs_;   // subsampled rays from all scans in window
+  float local_dx_{0.0f}, local_dy_{0.0f}, local_dt_{0.0f};  // shared local dead-reckoning
+  int   trajectory_subsample_{50};    // rays to subsample per scan into ray buffer
+  float free_space_weight_{0.3f};     // weight of ray-blocked score in combined score
+  float free_space_penalty_{1.0f};    // nats penalty per blocked intermediate cell
+  static constexpr float ray_step_m_{0.04f};  // step size for ray marching [m]
 
   ros::Subscriber map_sub_, init_pose_sub_;
   ros::Subscriber front_scan_sub_, rear_scan_sub_, odom_sub_;
