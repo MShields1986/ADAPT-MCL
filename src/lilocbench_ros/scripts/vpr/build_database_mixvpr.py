@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+"""
+Build VPR database using MixVPR descriptors.
+
+Loads existing keyframes (from extract_keyframes.py), extracts MixVPR
+descriptors, and builds a FAISS index.
+
+Usage:
+    docker compose run vpr scripts/vpr/build_database_mixvpr.py
+    docker compose run vpr scripts/vpr/build_database_mixvpr.py --weights /models/vpr/mixvpr_finetuned.pth
+"""
+
+import os
+import sys
+import pickle
+import argparse
+import numpy as np
+import torch
+import torchvision.transforms as T
+from PIL import Image
+
+MODELS_DIR = os.environ.get("LILOCBENCH_MODELS", "/models/vpr")
+MIXVPR_REPO = os.environ.get("MIXVPR_REPO", "/workspace/mixvpr_repo")
+
+
+def build_model(backbone="resnet18", out_channels=256, out_rows=4,
+                mix_depth=4, layers_to_freeze=0):
+    """Build MixVPR model (must match training config)."""
+    sys.path.insert(0, MIXVPR_REPO)
+    from models.helper import get_backbone, get_aggregator
+
+    bb = get_backbone(backbone, pretrained=True,
+                      layers_to_freeze=layers_to_freeze, layers_to_crop=[4])
+
+    with torch.no_grad():
+        feat = bb(torch.randn(1, 3, 480, 640))
+        in_ch, in_h, in_w = feat.shape[1], feat.shape[2], feat.shape[3]
+
+    agg = get_aggregator("mixvpr", {
+        "in_channels": in_ch, "in_h": in_h, "in_w": in_w,
+        "out_channels": out_channels, "out_rows": out_rows,
+        "mix_depth": mix_depth, "mlp_ratio": 1,
+    })
+
+    class Model(torch.nn.Module):
+        def __init__(self, backbone, aggregator):
+            super().__init__()
+            self.backbone = backbone
+            self.aggregator = aggregator
+        def forward(self, x):
+            return self.aggregator(self.backbone(x))
+
+    return Model(bb, agg)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--keyframes", type=str,
+                        default=os.path.join(MODELS_DIR, "keyframes.pkl"))
+    parser.add_argument("--weights", type=str, default="",
+                        help="Path to fine-tuned weights (empty=pretrained backbone)")
+    parser.add_argument("--backbone", type=str, default="resnet18")
+    parser.add_argument("--out-channels", type=int, default=256)
+    parser.add_argument("--out-rows", type=int, default=4)
+    parser.add_argument("--mix-depth", type=int, default=4)
+    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--output-db", type=str,
+                        default=os.path.join(MODELS_DIR, "database_mixvpr.pkl"))
+    parser.add_argument("--output-index", type=str,
+                        default=os.path.join(MODELS_DIR, "place_index_mixvpr.faiss"))
+    args = parser.parse_args()
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Device: {device}")
+
+    # Load keyframes
+    with open(args.keyframes, "rb") as f:
+        keyframes = pickle.load(f)
+    print(f"Loaded {len(keyframes)} keyframes")
+
+    # Build model
+    model = build_model(args.backbone, args.out_channels, args.out_rows, args.mix_depth)
+
+    if args.weights and os.path.exists(args.weights):
+        state = torch.load(args.weights, map_location=device)
+        model.load_state_dict(state)
+        print(f"Loaded fine-tuned weights: {args.weights}")
+    else:
+        print("Using pretrained backbone (no fine-tuned weights)")
+
+    model = model.to(device).eval()
+    desc_dim = args.out_channels * args.out_rows
+    print(f"Descriptor dimension: {desc_dim}")
+
+    transform = T.Compose([
+        T.Resize((480, 640)), T.ToTensor(),
+        T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+    ])
+
+    # Remap paths: keyframes.pkl may have host paths, remap to container /data/
+    data_dir = os.environ.get("LILOCBENCH_DATA", "/data")
+    for kf in keyframes:
+        for key, info in kf["images"].items():
+            # Replace any host path prefix with the container data dir
+            p = info["path"]
+            # Find the sequence-relative part (e.g., mapping/camera_front/color/images/...)
+            for marker in ["/data/", "/LILocBench/data/"]:
+                idx = p.find(marker)
+                if idx >= 0:
+                    info["path"] = os.path.join(data_dir, p[idx + len(marker):])
+                    break
+
+    # Extract descriptors
+    print("Extracting descriptors...")
+    all_descs = np.zeros((len(keyframes), desc_dim), dtype=np.float32)
+    for i in range(0, len(keyframes), args.batch_size):
+        batch = []
+        for j in range(i, min(i + args.batch_size, len(keyframes))):
+            img = Image.open(keyframes[j]["images"]["camera_front/color"]["path"]).convert("RGB")
+            batch.append(transform(img))
+        tensor = torch.stack(batch).to(device)
+        with torch.no_grad():
+            descs = model(tensor).cpu().numpy()
+        all_descs[i:i+len(batch)] = descs
+        if (i + args.batch_size) % 100 < args.batch_size:
+            print(f"  {min(i+args.batch_size, len(keyframes))}/{len(keyframes)}")
+
+    # L2 normalise
+    norms = np.linalg.norm(all_descs, axis=1, keepdims=True)
+    all_descs = all_descs / (norms + 1e-8)
+
+    # Store in keyframes
+    for i, kf in enumerate(keyframes):
+        kf["descriptor_mixvpr"] = all_descs[i]
+
+    # Build FAISS index
+    import faiss
+    index = faiss.IndexFlatL2(desc_dim)
+    index.add(all_descs)
+    faiss.write_index(index, args.output_index)
+    print(f"Saved index to {args.output_index}")
+
+    with open(args.output_db, "wb") as f:
+        pickle.dump(keyframes, f)
+    print(f"Saved database to {args.output_db}")
+
+    # Sanity check
+    D, I = index.search(all_descs[:5], k=3)
+    print(f"\nSanity (first 5 keyframes, top-3):")
+    for i in range(5):
+        print(f"  KF {i}: matches={[(I[i][j], f'{D[i][j]:.3f}') for j in range(3)]}")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,3 +1,7 @@
 docker/output/*
 CLAUDE.md
-icp_plan.md
+
+# VPR model weights, indices, and database files (large binaries)
+models/vpr/*.pth
+models/vpr/*.faiss
+models/vpr/*.pkl

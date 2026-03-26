@@ -1,0 +1,38 @@
+FROM pytorch/pytorch:2.1.0-cuda11.8-cudnn8-runtime
+
+SHELL ["/bin/bash", "-c"]
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Pin numpy<2 first (torch 2.1 needs it), then install everything else
+RUN pip install --no-cache-dir "numpy<2" \
+    && pip install --no-cache-dir \
+    "faiss-cpu==1.7.4" \
+    scipy \
+    Pillow \
+    pyyaml \
+    huggingface_hub \
+    safetensors \
+    gdown \
+    timm
+
+WORKDIR /workspace
+
+# Copy VPR scripts
+COPY src/lilocbench_ros/scripts/vpr /workspace/scripts/vpr
+
+# Pre-download model hub repos (cached in image)
+RUN python -c "import torch; torch.hub.load('gmberton/eigenplaces', 'get_trained_model', backbone='ResNet50', fc_output_dim=512, trust_repo=True)" \
+    && python -c "import torch; torch.hub.load('gmberton/MegaLoc', 'get_trained_model', trust_repo=True)"
+
+# Clone MixVPR repo for model definitions (cached in image)
+RUN git clone --depth=1 https://github.com/amaralibey/MixVPR.git /workspace/mixvpr_repo
+
+ENV LILOCBENCH_DATA=/data
+ENV LILOCBENCH_MODELS=/models/vpr
+ENV MIXVPR_REPO=/workspace/mixvpr_repo
+
+ENTRYPOINT ["python"]

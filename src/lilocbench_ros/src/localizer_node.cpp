@@ -1,9 +1,11 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <numeric>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -47,6 +49,8 @@ class LocalizerNode {
 
     init_pose_sub_ = nh_.subscribe(
         "/initialpose", 1, &LocalizerNode::on_initial_pose, this);
+    vpr_candidates_sub_ = nh_.subscribe(
+        "/vpr_candidates", 1, &LocalizerNode::on_vpr_candidates, this);
 
     // Independent callbacks — no synchronizer timing jitter.
     // Front scan drives PF updates; rear scan and odom are cached.
@@ -188,6 +192,9 @@ class LocalizerNode {
     // Motion noise floor
     pnh.param("min_trans_noise", motion_params_.min_trans_noise, 0.0f);
     pnh.param("min_rot_noise",   motion_params_.min_rot_noise,   0.0f);
+
+    // VPR candidates file: if set, read candidates from file after map loads
+    pnh.param<std::string>("vpr_candidates_file", vpr_candidates_file_, "");
   }
 
   // ------------------------------------------------------------------ map
@@ -218,7 +225,37 @@ class LocalizerNode {
         pf_params_, motion_params_, em_params_);
     pf_->initialize(*likelihood_field_, 0.0f, 0.0f, 0.0f);
 
-    if (pf_params_.use_scan_match_seed) {
+    // VPR candidates file: seed PF from external candidates (overrides other init)
+    if (!vpr_candidates_file_.empty()) {
+      std::ifstream fin(vpr_candidates_file_);
+      if (fin.is_open()) {
+        std::vector<adapt_mcl::ParticleFilter::ExternalCandidate> cands;
+        std::string line;
+        while (std::getline(fin, line)) {
+          if (line.empty() || line[0] == '#') continue;
+          std::istringstream iss(line);
+          float x, y, theta, weight;
+          if (iss >> x >> y >> theta >> weight) {
+            cands.push_back({x, y, theta, weight});
+          }
+        }
+        if (!cands.empty()) {
+          pf_->initialize_from_candidates(cands);
+          est_x_ = cands[0].x; est_y_ = cands[0].y; est_theta_ = cands[0].theta;
+          ROS_INFO("VPR file init: %zu candidates from %s",
+                   cands.size(), vpr_candidates_file_.c_str());
+          for (size_t i = 0; i < cands.size(); ++i) {
+            ROS_INFO("  %zu. (%.2f, %.2f, %.1f°) w=%.3f",
+                     i + 1, cands[i].x, cands[i].y,
+                     cands[i].theta * 180.0f / M_PI, cands[i].weight);
+          }
+        } else {
+          ROS_WARN("VPR file %s: no valid candidates found", vpr_candidates_file_.c_str());
+        }
+      } else {
+        ROS_WARN("VPR file %s: cannot open", vpr_candidates_file_.c_str());
+      }
+    } else if (pf_params_.use_scan_match_seed) {
       global_init_pending_ = true;
       ROS_INFO("Scan-match seed enabled — will re-init on first scan.");
     }
@@ -226,7 +263,7 @@ class LocalizerNode {
     std::string tum_path = output_dir_ + "/" + sequence_name_ + "/run_1.txt";
     logger_ = std::make_unique<TumLogger>(tum_path);
 
-    ROS_INFO("PF initialized (global localization mode).");
+    ROS_INFO("PF initialized.");
   }
 
   // ------------------------------------------------------------------ initialpose
@@ -248,6 +285,43 @@ class LocalizerNode {
     est_x_ = rx; est_y_ = ry; est_theta_ = rtheta;
     ROS_INFO("Re-initialized at /initialpose (%.3f, %.3f, %.1f°)",
              rx, ry, rtheta * 180.0f / M_PI);
+  }
+
+  // ------------------------------------------------------------------ VPR candidates
+  void on_vpr_candidates(const geometry_msgs::PoseArray::ConstPtr& msg) {
+    if (!pf_ || !likelihood_field_) {
+      ROS_WARN("/vpr_candidates received before map — ignored");
+      return;
+    }
+
+    std::vector<adapt_mcl::ParticleFilter::ExternalCandidate> candidates;
+    candidates.reserve(msg->poses.size());
+    for (const auto& p : msg->poses) {
+      float rx = static_cast<float>(p.position.x);
+      float ry = static_cast<float>(p.position.y);
+      float siny = 2.0f * (p.orientation.w * p.orientation.z
+                            + p.orientation.x * p.orientation.y);
+      float cosy = 1.0f - 2.0f * (p.orientation.y * p.orientation.y
+                                    + p.orientation.z * p.orientation.z);
+      float rtheta = std::atan2(siny, cosy);
+      // Use position.z as weight (piggyback on unused field)
+      float weight = static_cast<float>(p.position.z);
+      if (weight <= 0.0f) weight = 1.0f;
+      candidates.push_back({rx, ry, rtheta, weight});
+    }
+
+    if (candidates.empty()) {
+      ROS_WARN("/vpr_candidates: empty message — ignored");
+      return;
+    }
+
+    pf_->initialize_from_candidates(candidates);
+    est_x_ = candidates[0].x;
+    est_y_ = candidates[0].y;
+    est_theta_ = candidates[0].theta;
+    ROS_INFO("VPR init: %zu candidates, top=(%.2f, %.2f, %.1f°)",
+             candidates.size(), est_x_, est_y_,
+             est_theta_ * 180.0f / M_PI);
   }
 
   // ------------------------------------------------------------------ odom / rear scan (cached)
@@ -619,6 +693,7 @@ class LocalizerNode {
   float est_x_{0.0f}, est_y_{0.0f}, est_theta_{0.0f};
   float update_min_d_{0.0f};    // [m] odom gate threshold
   float update_min_a_{0.0f};    // [rad] odom gate threshold
+  std::string vpr_candidates_file_;  // path to VPR candidates file (empty = disabled)
 
   // Trajectory-consistent global init state
   bool  trajectory_init_pending_{false};
@@ -640,7 +715,7 @@ class LocalizerNode {
   float free_space_penalty_{1.0f};    // nats penalty per blocked intermediate cell
   static constexpr float ray_step_m_{0.04f};  // step size for ray marching [m]
 
-  ros::Subscriber map_sub_, init_pose_sub_;
+  ros::Subscriber map_sub_, init_pose_sub_, vpr_candidates_sub_;
   ros::Subscriber front_scan_sub_, rear_scan_sub_, odom_sub_;
   ros::Publisher  pose_pub_, cloud_pub_;
   tf2_ros::TransformBroadcaster tf_broadcaster_;

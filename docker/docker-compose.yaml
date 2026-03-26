@@ -173,6 +173,33 @@ services:
     command: sleep infinity
     profiles: [dev]
 
+  # ── VPR (Visual Place Recognition) ──────────────────────────────────────
+  # GPU-accelerated container for training and inference.
+  # Usage:
+  #   docker compose run vpr scripts/vpr/extract_keyframes.py
+  #   docker compose run vpr scripts/vpr/build_database.py
+  #   docker compose run vpr scripts/vpr/finetune_eigenplaces.py
+  #   docker compose run vpr scripts/vpr/publish_vpr_candidates.py --sequence static_0 --output-file /data/static_0/vpr_candidates.txt
+
+  vpr:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.vpr
+      network: host
+    profiles: [vpr]
+    ipc: host
+    volumes:
+      - ../src/lilocbench_ros/scripts/vpr:/workspace/scripts/vpr:ro
+      - ../models/vpr:/models/vpr
+      - ${DATA_DIR}:/data
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
 networks:
   net_mapping:
   net_static_0:

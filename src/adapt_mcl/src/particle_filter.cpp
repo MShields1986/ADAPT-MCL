@@ -147,6 +147,60 @@ std::tuple<float, float, float> ParticleFilter::initialize_global(
       : std::make_tuple(candidates[0].x, candidates[0].y, candidates[0].theta);
 }
 
+void ParticleFilter::initialize_from_candidates(
+    const std::vector<ExternalCandidate>& candidates) {
+  if (candidates.empty()) {
+    throw std::runtime_error(
+        "ParticleFilter::initialize_from_candidates: empty candidates");
+  }
+
+  int init_n = pf_params_.n_particles;
+  particles_.resize(init_n);
+
+  // Normalize weights
+  float w_sum = 0.0f;
+  for (const auto& c : candidates) w_sum += c.weight;
+  if (w_sum <= 0.0f) w_sum = 1.0f;
+
+  // VPR candidates have unreliable heading — the keyframe heading is
+  // whichever direction the robot faced during mapping, not necessarily
+  // the query robot's heading. Distribute particles uniformly in heading.
+  std::normal_distribution<float> pos_noise(0.0f, pf_params_.init_spread_pos_m);
+  std::uniform_real_distribution<float> heading_uniform(
+      -static_cast<float>(M_PI), static_cast<float>(M_PI));
+
+  int pi = 0;
+  for (size_t ci = 0; ci < candidates.size() && pi < init_n; ++ci) {
+    const auto& c = candidates[ci];
+    int count = static_cast<int>(
+        std::round((c.weight / w_sum) * init_n));
+    if (count < 1) count = 1;
+    if (pi + count > init_n) count = init_n - pi;
+
+    for (int k = 0; k < count; ++k, ++pi) {
+      particles_[pi].x          = c.x + pos_noise(rng_);
+      particles_[pi].y          = c.y + pos_noise(rng_);
+      particles_[pi].theta      = heading_uniform(rng_);
+      particles_[pi].log_weight = 0.0f;
+      particles_[pi].alpha      = 0.9f;
+    }
+  }
+
+  // Fill remaining with particles from the highest-weight candidate
+  if (pi < init_n) {
+    const auto& best = candidates[0];
+    for (; pi < init_n; ++pi) {
+      particles_[pi].x          = best.x + pos_noise(rng_);
+      particles_[pi].y          = best.y + pos_noise(rng_);
+      particles_[pi].theta      = heading_uniform(rng_);
+      particles_[pi].log_weight = 0.0f;
+      particles_[pi].alpha      = 0.9f;
+    }
+  }
+
+  initialized_ = true;
+}
+
 void ParticleFilter::initialize_tracking(const LikelihoodField& /*field*/,
                                           float x, float y, float theta) {
   particles_.resize(pf_params_.n_particles);

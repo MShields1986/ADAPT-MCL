@@ -85,6 +85,17 @@ class ParticleFilter {
       const LikelihoodField& field,
       const std::vector<std::array<float, 2>>& endpoints_bl);
 
+  /// Multi-hypothesis seeding from external candidate poses (e.g. VPR).
+  /// Distributes n_particles across candidates as Gaussian clusters,
+  /// weighted by the candidate scores. Each cluster uses
+  /// init_spread_pos_m / init_spread_angle_rad as its spread.
+  struct ExternalCandidate {
+    float x, y, theta;
+    float weight;  // relative importance (will be normalized)
+  };
+  void initialize_from_candidates(
+      const std::vector<ExternalCandidate>& candidates);
+
   /// Switch to tracking mode around a known pose (e.g. the result of initialize_global).
   /// Spreads n_particles tightly using init_spread_pos_m / init_spread_angle_rad.
   /// No random fraction — all particles are near (x, y, theta).

@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<launch>
+  <arg name="launch_rviz" default="true"/>
+  <arg name="output_dir"  default="/output/results"/>
+  <arg name="vpr_candidates_file" default="/data/lt_changes_0/vpr_candidates_megaloc_multicam.txt"/>
+
+  <include file="$(find lilocbench_ros)/launch/localize.launch">
+    <arg name="sequence"              value="lt_changes_0"/>
+    <arg name="bag"                   value="/data/lt_changes_0/lt_changes_0_no_cams.bag"/>
+    <arg name="map"                   value="/data/map_office/map_office.yaml"/>
+    <arg name="output_dir"            value="$(arg output_dir)"/>
+    <arg name="use_scan_match_seed"   value="false"/>
+    <arg name="use_cpd_rerank"        value="false"/>
+    <arg name="init_random_fraction"  value="0.0"/>
+    <arg name="kld_max_particles"     value="10000"/>
+  </include>
+
+  <param name="/localizer_node/vpr_candidates_file" value="$(arg vpr_candidates_file)"/>
+  <param name="/localizer_node/init_spread_pos_m"   value="0.5"/>
+  <param name="/localizer_node/n_particles"         value="5000"/>
+  <param name="/localizer_node/init_temperature_steps" value="20"/>
+  <param name="/localizer_node/init_temperature"       value="0.05"/>
+
+  <group if="$(arg launch_rviz)">
+    <node pkg="rviz" type="rviz" name="rviz" required="false" output="screen"
+          args="-d $(find lilocbench_ros)/config/default.rviz"/>
+  </group>
+</launch>
